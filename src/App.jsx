@@ -19,6 +19,7 @@ import { PEOPLE_DATA as PEOPLE } from './people'
 // ===============
 // 2) 工具 & 小组件
 // ===============
+
 const hasSupabase =
   Boolean(import.meta?.env?.VITE_SUPABASE_URL) &&
   Boolean(import.meta?.env?.VITE_SUPABASE_ANON_KEY)
@@ -39,6 +40,91 @@ function Badge({ children }) {
   )
 }
 
+// —— 把扁平评论按 parent_id 组装成树形
+function buildTree(rows) {
+  const byId = new Map()
+  rows.forEach(r => byId.set(r.id, { ...r, replies: [] }))
+  const roots = []
+  byId.forEach(node => {
+    if (node.parent_id) {
+      const parent = byId.get(node.parent_id)
+      parent ? parent.replies.push(node) : roots.push(node) // 容错：父被删
+    } else {
+      roots.push(node)
+    }
+  })
+  // 子回复时间顺/逆序可按需调整
+  roots.forEach(n => n.replies.sort((a,b) => new Date(a.created_at) - new Date(b.created_at)))
+  return roots
+}
+
+// —— 单条评论组件（递归渲染子回复）
+function CommentItem({ node, onReply }) {
+  const [replying, setReplying] = React.useState(false)
+  const [nick, setNick] = React.useState("")
+  const [text, setText] = React.useState("")
+
+  return (
+    <li className="rounded-md border bg-white px-3 py-2">
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-medium">{node.name || "匿名"}</span>
+        <span className="text-xs text-gray-500">{new Date(node.created_at).toLocaleString()}</span>
+      </div>
+      <p className="mt-1 text-[15px] leading-6 whitespace-pre-wrap">{node.text}</p>
+
+      {/* 回复按钮 */}
+      <button
+        className="mt-1 text-xs text-indigo-600 hover:underline"
+        onClick={() => setReplying(v => !v)}
+      >
+        {replying ? "收起" : "回复"}
+      </button>
+
+      {/* 回复输入框 */}
+      {replying && (
+        <form
+          className="mt-2 flex items-start gap-2"
+          onSubmit={e => {
+            e.preventDefault()
+            if (!text.trim()) return
+            onReply(node.id, { name: nick, text })
+            setText("")
+            setNick("")
+            setReplying(false)
+          }}
+        >
+          <input
+            type="text"
+            placeholder="你的昵称（可空）"
+            className="w-40 rounded-md border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+            value={nick}
+            onChange={(e) => setNick(e.target.value)}
+          />
+          <textarea
+            placeholder="写点什么…"
+            className="flex-1 rounded-md border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500 min-h-[44px]"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+          />
+          <button className="rounded-md border px-3 py-2 text-sm bg-indigo-600 text-white hover:bg-indigo-500">
+            发送
+          </button>
+        </form>
+      )}
+
+      {/* 子回复（缩进显示） */}
+      {node.replies?.length > 0 && (
+        <ul className="mt-2 space-y-2 pl-4 border-l">
+          {node.replies.map(child => (
+            <CommentItem key={child.id} node={child} onReply={onReply} />
+          ))}
+        </ul>
+      )}
+    </li>
+  )
+}
+
+
 // ===============
 // 3) 评论：本地存储（降级）
 // ===============
@@ -53,13 +139,14 @@ function useCommentsLocal(personId) {
     }
   })
 
-  const add = async ({ name, text }) => {
+  const add = async ({ name, text, parentId = null }) => {
     if (!text?.trim()) return
     const item = {
       id: String(Date.now()) + Math.random(),
       person_id: personId,
       name: name?.trim() || "匿名",
       text: text.trim(),
+      parent_id: parentId,            // 关键：本地也支持 parent_id
       created_at: new Date().toISOString(),
       _local: true,
     }
@@ -69,19 +156,26 @@ function useCommentsLocal(personId) {
   }
 
   const remove = async (id) => {
-    const next = comments.filter((c) => c.id !== id)
+    const next = comments.filter((c) => c.id !== id && c.parent_id !== id) // 简单地连同子回复删掉
     setComments(next)
     localStorage.setItem(key, JSON.stringify(next))
   }
 
-  return { comments, add, remove, loading: false, error: null, isCloud: false }
+  // 暴露树形结构给 UI
+  const tree = React.useMemo(() => buildTree(
+    comments
+      .filter(c => c.person_id === personId)
+      .sort((a,b) => new Date(a.created_at) - new Date(b.created_at))
+  ), [comments, personId])
+
+  return { commentsTree: tree, add, remove, loading: false, error: null, isCloud: false }
 }
 
 // ===============
 // 4) 评论：Supabase 云评论
 // ===============
 function useCommentsCloud(personId) {
-  const [comments, setComments] = useState([])
+  const [rows, setRows] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
@@ -93,22 +187,22 @@ function useCommentsCloud(personId) {
         .from("comments")
         .select("*")
         .eq("person_id", personId)
-        .order("created_at", { ascending: false })
+        .order("created_at", { ascending: true }) // 先按时间升序，树里好看
       if (!cancelled) {
         if (error) setError(error.message)
-        else setComments(data || [])
+        else setRows(data || [])
         setLoading(false)
       }
     }
     load()
 
-    // Realtime 订阅：新评论自动加入
+    // Realtime：监听插入
     const channel = supabase
       .channel(`comments:${personId}`)
       .on(
         "postgres_changes",
         { event: "INSERT", schema: "public", table: "comments", filter: `person_id=eq.${personId}` },
-        (payload) => setComments((prev) => [payload.new, ...prev])
+        (payload) => setRows((prev) => [...prev, payload.new])
       )
       .subscribe()
 
@@ -118,23 +212,28 @@ function useCommentsCloud(personId) {
     }
   }, [personId])
 
-  const add = async ({ name, text }) => {
+  const add = async ({ name, text, parentId = null }) => {
     if (!text?.trim()) return
     const { error } = await supabase.from("comments").insert({
       person_id: personId,
       name: name?.trim() || "匿名",
       text: text.trim(),
+      parent_id: parentId, // 关键：云端也写入 parent_id
     })
     if (error) throw error
   }
 
   const remove = async (id) => {
-    // 出于安全（RLS），前端默认不开放删除；请在 Supabase 后台操作
+    // 安全考虑：RLS 下默认不开放前端删除
     console.warn("删除请在 Supabase 后台进行：", id)
   }
 
-  return { comments, add, remove, loading, error, isCloud: true }
+  // 组树
+  const tree = React.useMemo(() => buildTree(rows), [rows])
+
+  return { commentsTree: tree, add, remove, loading, error, isCloud: true }
 }
+
 
 // ===============
 // 5) 个人卡片
@@ -145,14 +244,14 @@ function PersonCard({ person }) {
   const [posting, setPosting] = useState(false)
 
   const commentsApi = hasSupabase ? useCommentsCloud(person.id) : useCommentsLocal(person.id)
-  const { comments, add, loading, error, isCloud } = commentsApi
+  const { commentsTree, add, loading, error, isCloud } = commentsApi
 
   const onSubmit = async (e) => {
     e.preventDefault()
     if (!text.trim()) return
     try {
       setPosting(true)
-      await add({ name: nick, text })
+      await add({ name: nick, text, parentId: null })
       setText("")
     } catch (err) {
       alert("发布失败：" + (err?.message || String(err)))
@@ -244,19 +343,14 @@ function PersonCard({ person }) {
         </form>
 
         <ul className="mt-3 space-y-2">
-          {comments.map((c) => (
-            <li key={c.id} className="rounded-md border bg-white px-3 py-2">
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-medium">{c.name || "匿名"}</span>
-                <span className="text-xs text-gray-500">
-                  {new Date(c.created_at).toLocaleString()}
-                  {c._local ? " · 本机" : ""}
-                </span>
-              </div>
-              <p className="mt-1 text-[15px] leading-6 whitespace-pre-wrap">{c.text}</p>
-            </li>
+          {commentsTree.map(node => (
+            <CommentItem
+              key={node.id}
+              node={node}
+              onReply={(parentId, { name, text }) => add({ name, text, parentId })}
+            />
           ))}
-          {comments.length === 0 && !loading && (
+          {commentsTree.length === 0 && !loading && (
             <li className="text-sm text-gray-500">还没有评论，来占个沙发吧～</li>
           )}
         </ul>
