@@ -234,9 +234,68 @@ function useCommentsCloud(personId) {
   return { commentsTree: tree, add, remove, loading, error, isCloud: true }
 }
 
+// ===============
+// 5) 头像
+// ===============
+// 生成稳定“随机”的数：同一个 seed 每次都一样
+function hashSeed(str) {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+function rnd(seed, a = 0, b = 1) {
+  // xorshift
+  seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5;
+  const x = (seed >>> 0) / 4294967295;
+  return a + (b - a) * x;
+}
+
+function gradientFor(seedStr) {
+  const s0 = hashSeed(seedStr || "default");
+  //const h1 = Math.floor(rnd(s0, 0, 360));
+  //const h2 = Math.floor((h1 + rnd(s0 + 1, 60, 180)) % 360); // 与 h1 有一定差异
+  const h1 = Math.floor(rnd(s0, 320, 350));
+  const h2 = Math.floor(rnd(s0 + 1, 195, 215));
+  const a  = Math.floor(rnd(s0 + 2, 0, 360));               // 渐变角度
+  const s  = Math.floor(rnd(s0 + 3, 60, 85));               // 饱和度
+  const l1 = Math.floor(rnd(s0 + 4, 62, 72));               // 亮度1
+  const l2 = Math.floor(rnd(s0 + 5, 48, 60));               // 亮度2
+  // 线性渐变更柔和，也可换 radial/conic 看风格
+  return `linear-gradient(${a}deg, hsl(${h1} ${s}% ${l1}%), hsl(${h2} ${s}% ${l2}%))`;
+}
+
+/** 圆形渐变头像（无文字） */
+function Avatar({ seed, size = 48, showHole = true }) {
+  const bg = gradientFor(seed);
+  return (
+    <div
+      className="relative rounded-full ring-1 ring-black/5 shadow-sm"
+      style={{
+        width: size, height: size,
+        backgroundImage: bg,
+        // 轻微高光+内阴影，质感更像金属/搪瓷
+        boxShadow: "inset 0 0 12px rgba(255,255,255,.18), 0 2px 6px rgba(0,0,0,.08)"
+      }}
+      aria-hidden
+    >
+      {showHole && (
+        <span
+          className="absolute rounded-full bg-white/70 ring-1 ring-black/10"
+          style={{
+            width: size * 0.14, height: size * 0.14,
+            left: size * 0.12, top: size * 0.12
+          }}
+        />
+      )}
+    </div>
+  );
+}
 
 // ===============
-// 5) 个人卡片
+// 6) 个人卡片
 // ===============
 function PersonCard({ person }) {
   const [nick, setNick] = useState("")
@@ -268,9 +327,7 @@ function PersonCard({ person }) {
       className="rounded-xl border bg-white/80 backdrop-blur p-5 shadow-sm"
     >
       <div className="flex items-start gap-4">
-        <div className="h-12 w-12 rounded-full bg-gradient-to-br from-indigo-400 to-fuchsia-400 flex items-center justify-center text-white font-semibold">
-          {person.name?.slice(0, 1) || "友"}
-        </div>
+        <Avatar seed={person.id} size={48} showHole={false} />
         <div className="flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="text-lg font-semibold">{person.name || "匿名成员"}</h3>
