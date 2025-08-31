@@ -337,6 +337,7 @@ function PersonCard({ person }) {
                 {person.city}
               </span>
             )}
+            {person.age && person.age !== "-" && <Badge>{person.age}</Badge>}
             {person.mbti && <Badge>{person.mbti}</Badge>}
             {person.zodiac && <Badge>{person.zodiac}</Badge>}
             {person.gender && person.gender !== "-" && <Badge>{person.gender}</Badge>}
